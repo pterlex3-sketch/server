@@ -718,6 +718,27 @@ async function fbSet(path, value) {
     return res.ok;
 }
 
+// [FIX STALE SPECTATOR] Lepas UID penonton lama (tanpa koneksi aktif) dari match yang masih berjalan.
+// removeSpectator() sengaja TIDAK menghapus UID (supaya penonton bisa reconnect), sehingga
+// penonton yang putus lalu membuat/bergabung room baru selalu ditolak dengan
+// "Sudah berada di room lain". Di sini UID dilepas HANYA bila tidak ada socket penonton
+// yang masih terbuka (artinya benar-benar tidak sedang menonton di tempat lain).
+function _releaseStaleSpectatorByUid(userUid) {
+    try {
+        if (!userUid) return false;
+        const found = matchmaking.findRoomByUserUid(userUid);
+        if (!found || !found.isSpectator) return false;
+        const room = matchmaking.getRoom(found.roomId);
+        if (!room || !room.gameEngine) return false;
+        const hasLiveSocket = (room.gameEngine.spectatorSockets || []).some(s => s && s.readyState === WebSocket.OPEN);
+        if (hasLiveSocket) return false;
+        const allLeft = room.gameEngine.markSpectatorLeft();
+        if (allLeft) { room.status = 'finished'; room.finishedAt = Date.now(); }
+        console.log(`🧹 Penonton lama tanpa koneksi aktif dilepas dari room ${found.roomId} (uid=${userUid}) allLeft=${allLeft}`);
+        return true;
+    } catch (_e) { return false; }
+}
+
 // [FIX REJOIN CROSS-SERVER] Kumpulkan semua userUid yang terkait sebuah room (pemain asli
 // + spectator), supaya bisa ditandai/dibersihkan di Firebase /activeRoom/{uid}.
 // Bot sengaja dilewati (tidak punya akun/UID Firebase).
@@ -3894,13 +3915,21 @@ wss.on('connection', (socket) => {
                         // Fix: terima juga status 'finished' (room masih ada di memori
                         // hingga 5 menit via cleanupFinishedRooms sebelum dihapus total).
                         if (room && (room.status === 'playing' || room.status === 'finished')) {
+                            // [FIX] Jika socket ini tidak punya currentPlayer (mis. socket hasil reconnect yang
+                            // belum REJOIN_ROOM), pakai playerId + userUid dari payload — tapi HANYA bila
+                            // userUid cocok dengan pemain tsb di room (mencegah mengeluarkan pemain lain).
+                            let _leavingPid = currentPlayer ? currentPlayer.id : null;
+                            if (!_leavingPid && !data.isSpectator && data.playerId && data.userUid) {
+                                const _gp = room.gameEngine.getPlayerById(data.playerId);
+                                if (_gp && !_gp.isBot && _gp.userUid && _gp.userUid === data.userUid) _leavingPid = _gp.id;
+                            }
                             if (data.isSpectator) {
                                 const allLeft = room.gameEngine.markSpectatorLeft();
                                 if (allLeft) { room.status = 'finished'; room.finishedAt = Date.now(); }
                                 if (currentCustomRoomId === data.roomId) { currentCustomRoomId = null; isCustomRoomSpectator = false; }
                                 console.log(`🐛[LEAVE_MATCH] DIPROSES (spectator) allLeft=${allLeft} currentCustomRoomId(sesudah)=${currentCustomRoomId || 'null'} spectatorUserUids(sisa)=${JSON.stringify(room.gameEngine.spectatorUserUids || [])}`);
-                            } else if (currentPlayer) {
-                                const allLeft = room.gameEngine.markPlayerLeft(currentPlayer.id);
+                            } else if (_leavingPid) {
+                                const allLeft = room.gameEngine.markPlayerLeft(_leavingPid);
                                 if (allLeft) { room.status = 'finished'; room.finishedAt = Date.now(); }
                                 console.log(`🐛[LEAVE_MATCH] DIPROSES (pemain) allLeft=${allLeft} currentCustomRoomId(sesudah)=${currentCustomRoomId || 'null'}`);
                             } else {
@@ -4038,6 +4067,8 @@ wss.on('connection', (socket) => {
                         const _dbgFound = data.userUid ? matchmaking.findRoomByUserUid(data.userUid) : null;
                         console.log(`🐛[CREATE_CUSTOM_ROOM] userUid=${data.userUid || 'N/A'} currentCustomRoomId=${currentCustomRoomId || 'null'} findRoomByUserUid=${_dbgFound ? JSON.stringify(_dbgFound) : 'null'}`);
                     }
+                    // [FIX STALE SPECTATOR] lepas UID penonton lama (tanpa socket hidup) agar tidak salah ditolak
+                    if (!currentCustomRoomId && data.userUid) _releaseStaleSpectatorByUid(data.userUid);
                     if (currentCustomRoomId || (data.userUid && matchmaking.findRoomByUserUid(data.userUid))) {
                         console.log(`🐛[CREATE_CUSTOM_ROOM] ❌ ERROR "Sudah berada di room lain" DIKIRIM ke userUid=${data.userUid || 'N/A'}`);
                         socket.send(JSON.stringify({ type: 'ERROR', message: 'Sudah berada di room lain. Keluar dulu.' }));
@@ -4062,6 +4093,8 @@ wss.on('connection', (socket) => {
                         const _dbgFound2 = data.userUid ? matchmaking.findRoomByUserUid(data.userUid) : null;
                         console.log(`🐛[JOIN_CUSTOM_ROOM] userUid=${data.userUid || 'N/A'} currentCustomRoomId=${currentCustomRoomId || 'null'} findRoomByUserUid=${_dbgFound2 ? JSON.stringify(_dbgFound2) : 'null'}`);
                     }
+                    // [FIX STALE SPECTATOR] lepas UID penonton lama (tanpa socket hidup) agar tidak salah ditolak
+                    if (!currentCustomRoomId && data.userUid) _releaseStaleSpectatorByUid(data.userUid);
                     if (currentCustomRoomId || (data.userUid && matchmaking.findRoomByUserUid(data.userUid))) {
                         console.log(`🐛[JOIN_CUSTOM_ROOM] ❌ ERROR "Sudah berada di room lain" DIKIRIM ke userUid=${data.userUid || 'N/A'}`);
                         socket.send(JSON.stringify({ type: 'ERROR', message: 'Sudah berada di room lain. Keluar dulu.' }));
