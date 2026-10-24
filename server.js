@@ -665,11 +665,13 @@ async function fbGetToken() {
 }
 
 async function fbTransaction(path, updateFn) {
+  try { // [FIX STABIL] error jaringan/Firebase tidak boleh melempar — kembalikan false (caller punya fallback)
     const token = await fbGetToken();
     if (!token) return false;
     const url = `${FB_DB_URL}${path}.json`;
     for (let attempt = 0; attempt < 3; attempt++) {
         const getRes = await fetch(url, { headers: { Authorization: `Bearer ${token}`, "X-Firebase-ETag": "true" } });
+        if (!getRes.ok) { console.error(`❌ fbTransaction GET failed ${getRes.status}`); return false; }
         const etag   = getRes.headers.get("ETag") ?? "*";
         const cur    = await getRes.json();
         const next   = updateFn(cur === null ? undefined : cur);
@@ -686,6 +688,7 @@ async function fbTransaction(path, updateFn) {
         return false;
     }
     return false;
+  } catch (e) { console.error('❌ fbTransaction error:', e); return false; }
 }
 
 async function fbPush(path, value) {
@@ -3052,13 +3055,27 @@ class MatchmakingQueue {
                 }
                 const finalBots = this.MATCH_SIZE - finalPlayers.length;
                 finalPlayers.forEach(p => { try { p.socket.send(JSON.stringify({ type: 'MATCH_STARTING', humans: finalPlayers.length, bots: finalBots })); } catch(e) {} });
-                this.createMatch(finalPlayers, finalBots);
+                this._safeCreateMatch(finalPlayers, finalBots);
             }, this.PARTY_WAIT);
             this.partyGroupTimeouts.set(partyId, waitTimer);
             return;
         }
         allPlayers.forEach(p => { try { p.socket.send(JSON.stringify({ type: 'MATCH_STARTING', humans: allPlayers.length, bots: botsNeeded })); } catch(e) {} });
-        this.createMatch(allPlayers, botsNeeded);
+        this._safeCreateMatch(allPlayers, botsNeeded);
+    }
+
+    // [FIX STABIL] Bungkus createMatch supaya error (mis. Firebase gagal) TIDAK jadi unhandled
+    // rejection yang mematikan server. Pemain yang sudah keluar antrean diberi pesan ERROR
+    // (sama seperti handleTimeout) supaya tidak menunggu selamanya.
+    _safeCreateMatch(players, botCount) {
+        const onFail = (e) => {
+            console.error('❌ createMatch gagal:', e);
+            players.forEach(p => { try { if (p.socket.readyState === WebSocket.OPEN) p.socket.send(JSON.stringify({ type: 'ERROR', message: 'Gagal memulai match, coba lagi.' })); } catch(_) {} });
+        };
+        try {
+            const res = this.createMatch(players, botCount);
+            if (res && typeof res.catch === 'function') res.catch(onFail);
+        } catch (e) { onFail(e); }
     }
 
     checkAndCreateMatch() {
@@ -3068,7 +3085,7 @@ class MatchmakingQueue {
                 if (p.timeoutId) clearTimeout(p.timeoutId);
                 try { p.socket.send(JSON.stringify({ type: 'MATCH_STARTING', humans: this.MATCH_SIZE, bots: 0 })); } catch(e) {}
             });
-            this.createMatch(players, 0);
+            this._safeCreateMatch(players, 0);
         } else if (this.queue.length > 0 && !this.queue[0].timeoutId) {
             this.queue[0].timeoutId = setTimeout(() => this.handleTimeout(), this.WAIT_TIMEOUT);
         }
@@ -4542,6 +4559,8 @@ async function gracefulShutdown(signal) {
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+// [FIX STABIL] Jangan biarkan satu promise gagal mematikan seluruh server (dan semua room aktif).
+process.on('unhandledRejection', (reason) => { console.error('⚠️ unhandledRejection (server tetap berjalan):', reason); });
 
 // Restore state dari snapshot (jika ada) sebelum server mulai menerima koneksi
 restoreSnapshot();
