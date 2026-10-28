@@ -2051,6 +2051,7 @@ class GameEngine {
         if (playable.length === 0) {
             if (this.gs.drawPile.length === 0) { bot.mustForcePick = true; }
             else if (this.dealCard(bot)) {
+                this.botCountDrawForSticker(bot); // [STIKER BOT] hitung draw ini untuk pemicu Nangis/Kesal
                 bot.mustDraw = false; bot.hasPlayed = true;
                 this.gs.currentRoundPlays.push({ playerId: bot.id, playerName: bot.name, card: null, power: 0 });
             }
@@ -2099,6 +2100,7 @@ class GameEngine {
             this.broadcastLog(`⚠️ ${bot.name} gagal Tambah Kartu - Tumpukan Kartu habis → Ambil Kartu`);
             this.broadcastGameState(); return;
         }
+        this.botCountDrawForSticker(bot); // [STIKER BOT] hitung draw ini untuk pemicu Nangis/Kesal
         const newCard = bot.hand[bot.hand.length - 1];
         const isMatch = newCard && newCard.province === this.gs.currentProvince;
 
@@ -2328,14 +2330,7 @@ class GameEngine {
 
     handleDrawCardInternal(player) {
         this.clearAfkTimer(player);
-        if (player.isBot) {
-            player.roundDrawCount = (player.roundDrawCount || 0) + 1;
-            player.totalDrawCount = (player.totalDrawCount || 0) + 1;
-            // [STIKER BOT] Nangis/Kesal (acak 50:50) jika:
-            //   (a) draw kartu lebih dari 2x dalam 1 ronde, ATAU
-            //   (b) total draw kumulatif mencapai kelipatan 3 (3, 6, 9, ...)
-            if (player.roundDrawCount > 2 || player.totalDrawCount % BOT_DRAW_STICKER_EVERY === 0) this.botSendSadSticker(player);
-        }
+        if (player.isBot) this.botCountDrawForSticker(player);
         const drewOk = this.dealCard(player);
         if (drewOk) {
             // Cek apakah kartu yang baru didapat cocok dengan provinsi aktif
@@ -2876,7 +2871,8 @@ class GameEngine {
         // Bot yang kartunya sudah habis (menang/selesai) tidak boleh kirim stiker apa pun
         if (bot.winner || (bot.hand && bot.hand.length === 0)) return;
         if (this.isCustomRoom) return; // tidak berlaku di mode Tantang/Custom Match
-        if (this.gs.round <= 1) return; // [FIX] bot baru boleh kirim stiker setelah Ronde 1 selesai (mulai Ronde 2)
+        // Ronde 1: bot boleh kirim stiker APA PUN kecuali Bagus & Tertawa (keduanya baru boleh mulai Ronde 2)
+        if (this.gs.round <= 1 && (stickerId === 'bagus' || stickerId === 'tertawa')) return;
         if (!STICKER_IDS.has(stickerId)) return;
         const now = Date.now();
         const prio = STICKER_PRIORITY[stickerId] || 1;
@@ -2892,6 +2888,16 @@ class GameEngine {
         bot.lastStickerPriority = prio;
         this.broadcastToAll({ type: 'STICKER_RECEIVED', playerId: bot.id, playerName: bot.name, stickerId, ts: now });
         this.notifyBotsOfSticker(bot.id);
+    }
+
+    // Dipanggil SETIAP kali bot menarik kartu, dari semua jalur draw bot:
+    // botDrawSimultaneous (jalur utama), botPlayPhase2, dan handleDrawCardInternal.
+    // Nangis/Kesal (acak 50:50) jika: (a) draw > 2x dalam 1 ronde, ATAU (b) total draw kumulatif kelipatan 3.
+    botCountDrawForSticker(bot) {
+        if (!bot || !bot.isBot) return;
+        bot.roundDrawCount = (bot.roundDrawCount || 0) + 1;
+        bot.totalDrawCount = (bot.totalDrawCount || 0) + 1;
+        if (bot.roundDrawCount > 2 || bot.totalDrawCount % BOT_DRAW_STICKER_EVERY === 0) this.botSendSadSticker(bot);
     }
 
     // Bot sedih/kesal: pilih Nangis atau Kesal secara acak 50:50
