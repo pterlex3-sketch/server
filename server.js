@@ -28,7 +28,7 @@ const BOT_DRAW_STICKER_EVERY = 3; // Bot kirim Nangis/Kesal setiap kelipatan 3 k
 // muncul hampir tiap ronde) tidak menelan stiker langka (Tengil/Nangis/Kesal) lewat jeda.
 const STICKER_PRIORITY = { bagus: 1, tertawa: 1, diam: 2, nangis: 3, kesal: 3, tengil: 3 };
 const STICKER_MIN_GAP_MS = 800; // jarak minimal antar stiker dari bot yang sama (apa pun prioritasnya)
-const STICKER_SEND_CHANCE = 0.6; // Meski kondisi terpenuhi, bot cuma 60% kemungkinan benar-benar kirim stiker
+const STICKER_SEND_CHANCE = 0.4; // Meski kondisi terpenuhi, bot cuma 40% kemungkinan benar-benar kirim stiker
 
 // =============================================
 // DATA KARTU & PROVINSI
