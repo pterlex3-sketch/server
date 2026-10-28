@@ -2868,6 +2868,8 @@ class GameEngine {
     // =============================================
     botSendSticker(bot, stickerId) {
         if (!bot || !bot.isBot) return;
+        // Bot yang kartunya sudah habis (menang/selesai) tidak boleh kirim stiker apa pun
+        if (bot.winner || (bot.hand && bot.hand.length === 0)) return;
         if (this.isCustomRoom) return; // tidak berlaku di mode Tantang/Custom Match
         if (this.gs.round <= 1) return; // [FIX] bot baru boleh kirim stiker setelah Ronde 1 selesai (mulai Ronde 2)
         if (!STICKER_IDS.has(stickerId)) return;
