@@ -2871,6 +2871,8 @@ class GameEngine {
         // Bot yang kartunya sudah habis (menang/selesai) tidak boleh kirim stiker apa pun
         if (bot.winner || (bot.hand && bot.hand.length === 0)) return;
         if (this.isCustomRoom) return; // tidak berlaku di mode Tantang/Custom Match
+        // Tinggal 1 pemain yang masih punya kartu (lainnya sudah menang/menyerah) → pertandingan praktis selesai, bot diam
+        if (this.gs.gameOver || this.getActivePlayers().length <= 1) return;
         // Ronde 1: bot boleh kirim stiker APA PUN kecuali Bagus & Tertawa (keduanya baru boleh mulai Ronde 2)
         if (this.gs.round <= 1 && (stickerId === 'bagus' || stickerId === 'tertawa')) return;
         if (!STICKER_IDS.has(stickerId)) return;
