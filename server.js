@@ -23,6 +23,11 @@ const STICKER_IDS = new Set(['nangis', 'bagus', 'tertawa', 'tengil', 'kesal', 'd
 const STICKER_COOLDOWN_MS = 5000; // 5 detik — berlaku untuk player maupun bot
 const STICKER_DIAM_EVERY = 7; // Bot kirim stiker Diam setiap 7 stiker yang muncul dari pemain/bot lain
 const BOT_DRAW_STICKER_EVERY = 3; // Bot kirim Nangis/Kesal setiap kelipatan 3 kali draw kartu (kumulatif)
+// Prioritas stiker bot. Saat jeda (STICKER_COOLDOWN_MS) masih berjalan, stiker baru HANYA boleh lewat
+// jika prioritasnya LEBIH TINGGI dari stiker terakhir bot itu. Tujuannya: stiker rutin (Bagus/Tertawa,
+// muncul hampir tiap ronde) tidak menelan stiker langka (Tengil/Nangis/Kesal) lewat jeda.
+const STICKER_PRIORITY = { bagus: 1, tertawa: 1, diam: 2, nangis: 3, kesal: 3, tengil: 3 };
+const STICKER_MIN_GAP_MS = 800; // jarak minimal antar stiker dari bot yang sama (apa pun prioritasnya)
 const STICKER_SEND_CHANCE = 0.6; // Meski kondisi terpenuhi, bot cuma 60% kemungkinan benar-benar kirim stiker
 
 // =============================================
@@ -2874,10 +2879,17 @@ class GameEngine {
         if (this.gs.round <= 1) return; // [FIX] bot baru boleh kirim stiker setelah Ronde 1 selesai (mulai Ronde 2)
         if (!STICKER_IDS.has(stickerId)) return;
         const now = Date.now();
-        if (bot.lastStickerAt && (now - bot.lastStickerAt) < STICKER_COOLDOWN_MS) return;
+        const prio = STICKER_PRIORITY[stickerId] || 1;
+        if (bot.lastStickerAt) {
+            const elapsed = now - bot.lastStickerAt;
+            if (elapsed < STICKER_MIN_GAP_MS) return; // terlalu rapat dengan stiker sebelumnya
+            // Masih dalam jeda: hanya prioritas LEBIH TINGGI dari stiker terakhir yang boleh menerobos
+            if (elapsed < STICKER_COOLDOWN_MS && prio <= (bot.lastStickerPriority || 1)) return;
+        }
         // [STIKER BOT] Meskipun kondisi terpenuhi, bot hanya 60% kemungkinan benar-benar kirim stiker
         if (Math.random() >= STICKER_SEND_CHANCE) return;
         bot.lastStickerAt = now;
+        bot.lastStickerPriority = prio;
         this.broadcastToAll({ type: 'STICKER_RECEIVED', playerId: bot.id, playerName: bot.name, stickerId, ts: now });
         this.notifyBotsOfSticker(bot.id);
     }
