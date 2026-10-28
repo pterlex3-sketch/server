@@ -19,8 +19,10 @@ const wss = new WebSocket.Server({ server });
 // HARUS SAMA PERSIS dengan STICKER_LIST di index.html (client),
 // karena ID inilah yang dipetakan ke file gambar/stiker/<id>.mp4
 // =============================================
-const STICKER_IDS = new Set(['nangis', 'bagus', 'tertawa', 'tengil']);
-const STICKER_COOLDOWN_MS = 8000; // 8 detik — berlaku untuk player maupun bot
+const STICKER_IDS = new Set(['nangis', 'bagus', 'tertawa', 'tengil', 'kesal', 'diam']);
+const STICKER_COOLDOWN_MS = 5000; // 5 detik — berlaku untuk player maupun bot
+const STICKER_DIAM_EVERY = 7; // Bot kirim stiker Diam setiap 7 stiker yang muncul dari pemain/bot lain
+const BOT_DRAW_STICKER_EVERY = 3; // Bot kirim Nangis/Kesal setiap kelipatan 3 kali draw kartu (kumulatif)
 const STICKER_SEND_CHANCE = 0.6; // Meski kondisi terpenuhi, bot cuma 60% kemungkinan benar-benar kirim stiker
 
 // =============================================
@@ -1932,10 +1934,12 @@ class GameEngine {
             this.broadcastLog(`🚫 Kartu dari provinsi ${this.gs.currentProvince} pada kartu tersisa telah habis! Pemain cukup 1x tambah kartu saja.`);
         }
 
+        const suffererIds = []; // [STIKER BOT] lawan yang ronde ini terpaksa draw/force-pick (untuk hitungan Tengil kumulatif)
         this.getActivePlayers().forEach(player => {
             if (player.hasPlayed) return;
             const hasMatching = player.hand.some(c => c.province === this.gs.currentProvince);
             if (!hasMatching) {
+                suffererIds.push(player.id);
                 // [STIKER BOT] Lacak berapa ronde berturut-turut pemain ini kena draw/force-pick
                 player.forcedStreakCount = (player.forcedStreakCount || 0) + 1;
                 if (drawPileEmpty) { player.mustForcePick = true; }
@@ -1977,7 +1981,13 @@ class GameEngine {
             const madeOpponentSuffer = this.getActivePlayers().some(p =>
                 p.id !== provinceSetterBot.id && (p.forcedStreakCount || 0) > 2
             );
-            if (madeOpponentSuffer) this.botSendSticker(provinceSetterBot, 'tengil');
+            // Pemicu tambahan: total lawan yang terpaksa draw/force-pick karena bot ini (kumulatif, TIDAK harus
+            // berturut-turut) mencapai kelipatan 3 (3, 6, 9, ...) → Tengil
+            const prevSuffer = provinceSetterBot.opponentSufferTotal || 0;
+            const newSuffer = prevSuffer + suffererIds.filter(id => id !== provinceSetterBot.id).length;
+            provinceSetterBot.opponentSufferTotal = newSuffer;
+            const crossedMultiple = Math.floor(newSuffer / 3) > Math.floor(prevSuffer / 3);
+            if (madeOpponentSuffer || crossedMultiple) this.botSendSticker(provinceSetterBot, 'tengil');
         }
         // ── Pisahkan pemain: yang mustDraw masuk antrian round-robin, yang punya kartu cocok langsung main ──
         // Hanya BOT yang masuk startSimultaneousDraw — human mustDraw menunggu aksi DRAW_CARD dari client
@@ -2253,9 +2263,9 @@ class GameEngine {
                 this.gs.topCard.splice(this.gs.topCard.findIndex(c => c.id === chosen.id), 1);
                 bot.hand.push(chosen); bot.mustForcePick = false; bot.hasPlayed = true;
                 this.updatePower(bot);
-                // [STIKER BOT] Force-pick/draw lebih dari 2 ronde berturut-turut → stiker Nangis
+                // [STIKER BOT] Force-pick/draw lebih dari 2 ronde berturut-turut → stiker Nangis/Kesal (acak 50:50)
                 // (forcedStreakCount sudah dihitung di startPhase2 — di sini cukup dicek saja)
-                if ((bot.forcedStreakCount || 0) > 2) this.botSendSticker(bot, 'nangis');
+                if ((bot.forcedStreakCount || 0) > 2) this.botSendSadSticker(bot);
                 this.checkBotTengilSticker(bot);
                 this.gs.currentRoundPlays.push({ playerId: bot.id, playerName: bot.name, card: chosen, power: chosen.power, isForcePickPlay: true });
                 this.broadcastLog(`👤 ${bot.name} Mengambil kartu: ${chosen.name} (Kekuatan: ${chosen.power})`);
@@ -2315,8 +2325,11 @@ class GameEngine {
         this.clearAfkTimer(player);
         if (player.isBot) {
             player.roundDrawCount = (player.roundDrawCount || 0) + 1;
-            // [STIKER BOT] Draw kartu lebih dari 3x dalam 1 ronde → stiker Nangis
-            if (player.roundDrawCount > 3) this.botSendSticker(player, 'nangis');
+            player.totalDrawCount = (player.totalDrawCount || 0) + 1;
+            // [STIKER BOT] Nangis/Kesal (acak 50:50) jika:
+            //   (a) draw kartu lebih dari 2x dalam 1 ronde, ATAU
+            //   (b) total draw kumulatif mencapai kelipatan 3 (3, 6, 9, ...)
+            if (player.roundDrawCount > 2 || player.totalDrawCount % BOT_DRAW_STICKER_EVERY === 0) this.botSendSadSticker(player);
         }
         const drewOk = this.dealCard(player);
         if (drewOk) {
@@ -2443,9 +2456,9 @@ class GameEngine {
                 this.gs.topCard.splice(this.gs.topCard.findIndex(c => c.id === chosen.id), 1);
                 bot.hand.push(chosen); bot.mustForcePick = false; bot.hasPlayed = true;
                 this.updatePower(bot);
-                // [STIKER BOT] Force-pick/draw lebih dari 2 ronde berturut-turut → stiker Nangis
+                // [STIKER BOT] Force-pick/draw lebih dari 2 ronde berturut-turut → stiker Nangis/Kesal (acak 50:50)
                 // (forcedStreakCount sudah dihitung di startPhase2 — di sini cukup dicek saja)
-                if ((bot.forcedStreakCount || 0) > 2) this.botSendSticker(bot, 'nangis');
+                if ((bot.forcedStreakCount || 0) > 2) this.botSendSadSticker(bot);
                 this.checkBotTengilSticker(bot);
                 this.gs.currentRoundPlays.push({ playerId: bot.id, playerName: bot.name, card: chosen, power: chosen.power, isForcePickPlay: true });
                 this.broadcastLog(`👤 ${bot.name} Mengambil kartu: ${chosen.name} (Kekuatan: ${chosen.power})`);
@@ -2851,7 +2864,7 @@ class GameEngine {
     // =============================================
     // FITUR STIKER — BOT
     // Bot hanya boleh pakai stiker di mode RANKED (bukan Custom Match/Tantang).
-    // Cooldown 8 detik berlaku sama seperti player (disimpan di bot.lastStickerAt).
+    // Cooldown 5 detik berlaku sama seperti player (disimpan di bot.lastStickerAt).
     // =============================================
     botSendSticker(bot, stickerId) {
         if (!bot || !bot.isBot) return;
@@ -2864,6 +2877,26 @@ class GameEngine {
         if (Math.random() >= STICKER_SEND_CHANCE) return;
         bot.lastStickerAt = now;
         this.broadcastToAll({ type: 'STICKER_RECEIVED', playerId: bot.id, playerName: bot.name, stickerId, ts: now });
+        this.notifyBotsOfSticker(bot.id);
+    }
+
+    // Bot sedih/kesal: pilih Nangis atau Kesal secara acak 50:50
+    botSendSadSticker(bot) {
+        this.botSendSticker(bot, Math.random() < 0.5 ? 'nangis' : 'kesal');
+    }
+
+    // Dipanggil setiap kali ada stiker muncul di room (dari pemain MAUPUN bot).
+    // Tiap bot LAIN (bukan pengirim) menghitung; setiap kelipatan 7 → kirim stiker Diam.
+    // Penghitung selalu di-reset di angka 7 meski pengiriman ditahan (cooldown/peluang 60%/Ronde 1).
+    notifyBotsOfSticker(senderId) {
+        this.gs.players.forEach(p => {
+            if (!p.isBot || p.id === senderId) return;
+            p.stickerSeenCount = (p.stickerSeenCount || 0) + 1;
+            if (p.stickerSeenCount >= STICKER_DIAM_EVERY) {
+                p.stickerSeenCount = 0;
+                this.botSendSticker(p, 'diam');
+            }
+        });
     }
 
     // Dipanggil setiap kali kartu di tangan bot berkurang/bertambah — kirim stiker "tengil"
@@ -4302,7 +4335,7 @@ wss.on('connection', (socket) => {
                         if (room) {
                             const rp = room.players.find(p => p.id === currentPlayer.id);
                             const now = Date.now();
-                            // [ANTI-SPAM] Rate limit server-side 3 detik per pemain, terlepas dari klien.
+                            // [ANTI-SPAM] Rate limit server-side 5 detik per pemain, terlepas dari klien.
                             // Ini mencegah klien yang dimodifikasi mengirim stiker lebih cepat dari cooldown UI.
                             if (rp) {
                                 if (rp.lastStickerAt && (now - rp.lastStickerAt) < STICKER_COOLDOWN_MS) break;
@@ -4315,6 +4348,8 @@ wss.on('connection', (socket) => {
                                 stickerId: data.stickerId,
                                 ts: now
                             });
+                            // [STIKER BOT] Hitung stiker pemain ini untuk pemicu stiker Diam milik bot
+                            room.gameEngine.notifyBotsOfSticker(currentPlayer.id);
                         }
                     }
                     break;
