@@ -767,6 +767,55 @@ async function fbSet(path, value) {
     return res.ok;
 }
 
+// [FIX LEAVE SAAT BUAT ROOM BARU] Client menyertakan daftar room yang sudah ia tinggalkan
+// (catatan "keluar belum terkonfirmasi") bersama CREATE/JOIN_CUSTOM_ROOM. Ini menjamin pelepasan
+// room lama terjadi SEBELUM pengecekan "Sudah berada di room lain", walau LEAVE_MATCH sebelumnya
+// tidak pernah sampai (koneksi lemah/putus). Aturan keamanan:
+//  - identitas HANYA dari userUid request ini (bukan dari isi item), jadi user hanya bisa
+//    melepas dirinya sendiri; maksimal 5 item; idempotent (aman dipanggil berulang).
+//  - hanya room berstatus 'playing'/'finished' (sama seperti handler LEAVE_MATCH).
+//  - pemain yang sudah leftMatch dilewati; rejoinRoom() sudah menolak pemain leftMatch,
+//    jadi pelepasan ini bersifat final dan konsisten.
+function _releaseLeftRoomsForUser(list, userUid, socket) {
+    try {
+        if (!Array.isArray(list) || !userUid || userUid === 'BOT') return;
+        const seen = new Set();
+        list.slice(0, 5).forEach(item => {
+            try {
+                const roomId = (item && typeof item.roomId === 'string') ? item.roomId : '';
+                if (!roomId || seen.has(roomId)) return;
+                seen.add(roomId);
+                const room = matchmaking.getRoom(roomId);
+                let result = 'already_gone';
+                if (room && room.gameEngine) {
+                    if (room.status !== 'playing' && room.status !== 'finished') {
+                        return; // mis. 'starting' -> jangan di-ACK, client akan mencoba lagi nanti
+                    }
+                    const ge = room.gameEngine;
+                    if (item.isSpectator) {
+                        if ((ge.spectatorUserUids || []).includes(userUid)) {
+                            const allLeft = ge.markSpectatorLeft();
+                            if (allLeft) { room.status = 'finished'; room.finishedAt = Date.now(); }
+                            result = 'left';
+                        }
+                    } else {
+                        const gp = ge.gs.players.find(p => !p.isBot && p.userUid === userUid);
+                        if (gp && !gp.leftMatch) {
+                            const allLeft = ge.markPlayerLeft(gp.id);
+                            if (allLeft) { room.status = 'finished'; room.finishedAt = Date.now(); }
+                            result = 'left';
+                        }
+                    }
+                }
+                console.log(`🧹[RELEASE_LEFT_ROOMS] uid=${userUid} room=${roomId} result=${result}`);
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    try { socket.send(JSON.stringify({ type: 'LEAVE_MATCH_ACK', roomId, result })); } catch(_) {}
+                }
+            } catch (_e) {}
+        });
+    } catch (_e) {}
+}
+
 // [FIX STALE SPECTATOR] Lepas UID penonton lama (tanpa koneksi aktif) dari match yang masih berjalan.
 // removeSpectator() sengaja TIDAK menghapus UID (supaya penonton bisa reconnect), sehingga
 // penonton yang putus lalu membuat/bergabung room baru selalu ditolak dengan
@@ -4092,6 +4141,7 @@ wss.on('connection', (socket) => {
                     break;
 
                 case 'LEAVE_MATCH':
+                    let _leaveResult = 'already_gone'; // 'left' | 'already_gone' | 'retry'
                     if (data.roomId) {
                         const room = matchmaking.getRoom(data.roomId);
                         console.log(`🐛[LEAVE_MATCH] room=${data.roomId} ditemukan=${!!room} status=${room ? room.status : 'N/A'} isSpectator=${!!data.isSpectator} userUid=${data.userUid || 'N/A'} currentCustomRoomId(sebelum)=${currentCustomRoomId || 'null'}`);
@@ -4115,11 +4165,13 @@ wss.on('connection', (socket) => {
                                 if (_gp && !_gp.isBot && _gp.userUid && _gp.userUid === data.userUid) _leavingPid = _gp.id;
                             }
                             if (data.isSpectator) {
+                                _leaveResult = 'left';
                                 const allLeft = room.gameEngine.markSpectatorLeft();
                                 if (allLeft) { room.status = 'finished'; room.finishedAt = Date.now(); }
                                 if (currentCustomRoomId === data.roomId) { currentCustomRoomId = null; isCustomRoomSpectator = false; }
                                 console.log(`🐛[LEAVE_MATCH] DIPROSES (spectator) allLeft=${allLeft} currentCustomRoomId(sesudah)=${currentCustomRoomId || 'null'} spectatorUserUids(sisa)=${JSON.stringify(room.gameEngine.spectatorUserUids || [])}`);
                             } else if (_leavingPid) {
+                                _leaveResult = 'left';
                                 const allLeft = room.gameEngine.markPlayerLeft(_leavingPid);
                                 if (allLeft) { room.status = 'finished'; room.finishedAt = Date.now(); }
                                 console.log(`🐛[LEAVE_MATCH] DIPROSES (pemain) allLeft=${allLeft} currentCustomRoomId(sesudah)=${currentCustomRoomId || 'null'}`);
@@ -4127,6 +4179,7 @@ wss.on('connection', (socket) => {
                                 console.log(`🐛[LEAVE_MATCH] DI-SKIP: bukan spectator & currentPlayer kosong`);
                             }
                         } else {
+                            if (room) _leaveResult = 'retry'; // room ada tapi status belum 'playing'/'finished' (mis. 'starting')
                             console.log(`🐛[LEAVE_MATCH] DI-SKIP: room ${room ? `status='${room.status}' (bukan playing/finished)` : 'TIDAK DITEMUKAN (sudah dihapus dari memori)'}`);
                         }
                     }
@@ -4138,7 +4191,7 @@ wss.on('connection', (socket) => {
                     // Pesan ini murni tambahan; client lama yang belum mengenalinya akan
                     // mengabaikannya begitu saja (tidak ada case untuk tipe ini di switch-nya).
                     if (socket.readyState === WebSocket.OPEN) {
-                        try { socket.send(JSON.stringify({ type: 'LEAVE_MATCH_ACK', roomId: data.roomId || null })); } catch(_) {}
+                        try { socket.send(JSON.stringify({ type: 'LEAVE_MATCH_ACK', roomId: data.roomId || null, result: _leaveResult })); } catch(_) {}
                     }
                     break;
 
@@ -4242,6 +4295,7 @@ wss.on('connection', (socket) => {
                     break;
 
                 case 'CREATE_CUSTOM_ROOM':
+                    if (data.userUid) _releaseLeftRoomsForUser(data.leaveRooms, data.userUid, socket);
                     if (currentCustomRoomId) {
                         const _staleP = matchmaking.getPendingCustomRoom(currentCustomRoomId);
                         const _staleA = matchmaking.getRoom(currentCustomRoomId);
@@ -4275,6 +4329,7 @@ wss.on('connection', (socket) => {
                     break;
 
                 case 'JOIN_CUSTOM_ROOM':
+                    if (data.userUid) _releaseLeftRoomsForUser(data.leaveRooms, data.userUid, socket);
                     if (currentCustomRoomId) {
                         const _prevRoom = matchmaking.getPendingCustomRoom(currentCustomRoomId);
                         const _uid = currentPlayer?.userUid || data.userUid;
