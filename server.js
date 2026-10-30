@@ -2869,7 +2869,7 @@ class GameEngine {
     }
 
     cleanupMatch() {
-        if (this.gs.gameOver) return;
+        if (this.gs.gameOver) { console.log(`🧹 cleanupMatch dilewati (match sudah selesai) room=${this.roomId}`); return; }
         this.gs.gameOver = true;
         this.clearAllAfkTimers();
         console.log(`🧹 Match ${this.roomId} dibersihkan`);
@@ -4215,6 +4215,7 @@ wss.on('connection', (socket) => {
                         const pendingMarkLeft = pendingCustomMarkLeftTimers.get(data.playerId);
                         if (pendingMarkLeft) { clearTimeout(pendingMarkLeft); pendingCustomMarkLeftTimers.delete(data.playerId); }
                         const success = matchmaking.rejoinRoom(data.roomId, data.playerId, data.playerName || 'Player', data.userUid || '', socket);
+                        console.log(`🔁 REJOIN_ROOM room=${data.roomId} pemain=${data.playerName || data.playerId} sukses=${success}`);
                         if (success) {
                             currentPlayer = { id: data.playerId, name: data.playerName || 'Player', socket, joinTime: Date.now(), userUid: data.userUid || '' };
                             const room = matchmaking.getRoom(data.roomId);
