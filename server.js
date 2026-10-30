@@ -3009,6 +3009,28 @@ class GameEngine {
 
     getPlayerById(playerId) { return this.gs.players.find(p => p.id === playerId); }
 
+    // [FIX REJOIN] Apakah pemain manusia ini sedang punya aksi yang harus dilakukan sekarang?
+    hasPendingHumanAction(player) {
+        if (!player || player.isBot || player.winner || player.hasPlayed || this.gs.gameOver) return false;
+        if (this.gs.phase === 1) return this.gs.phase1Player === player.id;
+        if (this.gs.phase === 2) {
+            if (player.mustPlayMatching || player.mustDraw) return true;
+            if (player.mustForcePick) return !!this.gs.forcePickMode;
+            return player.hand.some(c => c.province === this.gs.currentProvince);
+        }
+        return false;
+    }
+
+    // [FIX REJOIN] Timer AFK hanya dipasang saat langkah dimulai DAN pemain belum autoMode. Kalau pemain refresh
+    // (autoMode menyala karena putus koneksi) lalu rejoin, langkah yang sedang berjalan tidak punya timer AFK sama
+    // sekali, sehingga pemain menunggu selamanya. Fungsi ini memasang ulang timer AFK untuk aksi yang sedang tertunda.
+    rearmAfkTimerIfPending(player) {
+        if (!this.hasPendingHumanAction(player)) return;
+        this.setAfkTimer(player, () => {
+            if (this.hasPendingHumanAction(player)) this.setPlayerAutoMode(player.id, true, 'AFK');
+        });
+    }
+
     setPlayerAutoMode(playerId, enabled, reason = 'disconnect') {
         const player = this.gs.players.find(p => p.id === playerId);
         if (!player || player.isBot || player.winner) return;
@@ -3035,6 +3057,8 @@ class GameEngine {
             }
             // [FIX v15] Cancel grace timer "pemain terakhir disconnect" jika masih berjalan
             if (this._loserGraceTimer) { clearTimeout(this._loserGraceTimer); this._loserGraceTimer = null; }
+            // [FIX REJOIN] pasang ulang timer AFK kalau pemain punya aksi yang tertunda
+            this.rearmAfkTimerIfPending(player);
         }
         this.broadcastGameState();
     }
