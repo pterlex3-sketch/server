@@ -610,9 +610,11 @@ const DRAW_RATES = {
 const RARITY_ORDER = ['magis','sakral','mythic','legendary','epic','rareplus','rarestar','rare','uncommon','uncommonplus','commonplus','common'];
 // ── HUKUMAN AFK (di belakang layar, tidak ditampilkan ke pemain) ──
 // Pemain yang masuk mode otomatis karena AFK mendapat peluang kartu cocok (saat Tambah Kartu)
-// dikurangi 15 poin persen. Contoh: 19,8% jadi 4,8%; 99% jadi 84%. Nilai dasar drawProb TIDAK berubah,
+// dikurangi 25 poin persen. Contoh: 19,8% jadi 1% (batas bawah); 99% jadi 74%. Nilai dasar drawProb TIDAK berubah,
 // pengurangan hanya dipakai saat undian kartu cocok di dealCard().
-const AUTO_MATCH_PENALTY = 0.15;
+const AUTO_MATCH_PENALTY = 0.25;
+// Batas bawah peluang setelah dikurangi: tidak boleh 0%, minimal 1%.
+const MIN_ADJUSTED_MATCH_PROB = 0.01;
 // true  = hanya berlaku untuk mode otomatis karena AFK (tidak bergerak).
 // false = berlaku untuk semua mode otomatis, termasuk koneksi terputus.
 const AUTO_PENALTY_ONLY_AFK = false;
@@ -620,6 +622,13 @@ const AUTO_PENALTY_ONLY_AFK = false;
 // Bot Lv1 di-nerf (-10 poin persen), Bot Lv2 normal, Bot Lv3 di-buff (+10 poin persen, maksimal 99%).
 const BOT_L1_MATCH_PENALTY = 0.10;
 const BOT_L3_MATCH_BONUS   = 0.10;
+// ── SYARAT BERLAKUNYA PENYESUAIAN (hukuman mode otomatis + nerf/buff bot) ──
+// Penyesuaian hanya aktif jika SEMUA syarat ini terpenuhi saat Tambah Kartu:
+//   1) Level Tambah Kartu pemain/bot masih DI BAWAH level 8 (Lv1 sampai Lv7).
+//   2) Stok kartu dari tingkatan Elite sampai Dasar masih tersisa di Kartu Tersisa
+//      (setiap tingkatan di bawah ini masih punya minimal 1 kartu yang bisa dibagikan).
+const ADJUST_BELOW_LEVEL = 8;
+const ADJUST_REQUIRED_RARITIES = ['rareplus','rarestar','rare','uncommon','uncommonplus','commonplus','common']; // Elite, Spesial, Langka, Unik, Umum, Biasa, Dasar
 const LEVEL_NAMES = { 1:'Lv1', 2:'Lv2', 3:'Lv3', 4:'Lv4', 5:'Lv5', 6:'Lv6', 7:'Lv7', 8:'Lv8', 9:'Lv9', 10:'Lv10', 11:'Lv11', 12:'Lv12' };
 
 function calcDrawLevel(drawCount) {
@@ -1203,12 +1212,15 @@ class GameEngine {
 
         // Tentukan apakah draw ini akan dapat kartu satu provinsi dengan top card
         // [HUKUMAN AFK] kurangi peluang efektif untuk pemain mode otomatis (tidak mengubah drawProb dasar)
-        const _penalized = !!player.autoMode && !player.isBot && (!AUTO_PENALTY_ONLY_AFK || player.autoReason === 'AFK');
-        let effectiveProb = _penalized ? Math.max(0, prob - AUTO_MATCH_PENALTY) : prob;
+        // Syarat aktif: level Tambah Kartu < 8 DAN stok kartu Elite sampai Dasar masih tersisa
+        const _adjustActive = (player.drawLevel ?? 1) < ADJUST_BELOW_LEVEL
+            && ADJUST_REQUIRED_RARITIES.every(r => availableCards.some(c => c.rarity === r));
+        const _penalized = _adjustActive && !!player.autoMode && !player.isBot && (!AUTO_PENALTY_ONLY_AFK || player.autoReason === 'AFK');
+        let effectiveProb = _penalized ? Math.max(MIN_ADJUSTED_MATCH_PROB, prob - AUTO_MATCH_PENALTY) : prob;
         // [LEVEL BOT] Lv1 dikurangi, Lv2 normal, Lv3 ditambah (maks 99%). Nilai dasar drawProb tidak berubah.
-        if (player.isBot) {
+        if (player.isBot && _adjustActive) {
             const _bl = player.botLevel ?? 1;
-            if (_bl === 1)      effectiveProb = Math.max(0, prob - BOT_L1_MATCH_PENALTY);
+            if (_bl === 1)      effectiveProb = Math.max(MIN_ADJUSTED_MATCH_PROB, prob - BOT_L1_MATCH_PENALTY);
             else if (_bl === 3) effectiveProb = Math.min(0.99, prob + BOT_L3_MATCH_BONUS);
         }
         const useMatching = matchingCards.length > 0 && Math.random() < effectiveProb;
@@ -1300,7 +1312,7 @@ class GameEngine {
         const isMatch  = chosen.province === this.gs.currentProvince;
         // Sembunyikan angka persen di log untuk pemain mode otomatis & bot level 1/3 (peluangnya sudah disesuaikan),
         // supaya angka yang tampil tidak menyesatkan. Bot level 2 dan pemain normal tetap menampilkan angka dasar.
-        const _hideProbInLog = _penalized || (player.isBot && (player.botLevel ?? 1) !== 2);
+        const _hideProbInLog = _penalized || (_adjustActive && player.isBot && (player.botLevel ?? 1) !== 2);
         const modeStr  = _hideProbInLog
             ? (useMatching ? '✅ Cocok' : '❌ Non-Cocok')
             : (useMatching ? `✅ Cocok [prob ${probPct}%]` : `❌ Non-Cocok [prob ${probPct}%]`);
