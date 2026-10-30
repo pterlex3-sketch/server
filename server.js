@@ -2846,7 +2846,7 @@ class GameEngine {
         player.leftMatch = true;
         const humans = this.gs.players.filter(p => !p.isBot);
         const leftCount = humans.filter(p => p.leftMatch).length;
-        console.log(`🚪 ${player.name} keluar (${leftCount}/${humans.length})`);
+        console.log(`🚪 ${player.name} dikeluarkan dari room ${this.roomId} (${leftCount}/${humans.length} pemain manusia sudah keluar)`);
         // [FIX #1] _spectatorLeft semantics:
         //   null  = ranked room (no spectator concept) → cleanup boleh jalan
         //   false = custom room, spectator masih terhubung/reconnectable → tahan cleanup
@@ -2861,6 +2861,7 @@ class GameEngine {
 
     markSpectatorLeft() {
         this._spectatorLeft = true;
+        console.log(`👁️ Penonton keluar dari room ${this.roomId}`);
         this.spectatorSockets = []; this.spectatorUserUids = [];
         const humans = this.gs.players.filter(p => !p.isBot);
         const leftCount = humans.filter(p => p.leftMatch).length;
@@ -4160,9 +4161,18 @@ wss.on('connection', (socket) => {
                             // belum REJOIN_ROOM), pakai playerId + userUid dari payload — tapi HANYA bila
                             // userUid cocok dengan pemain tsb di room (mencegah mengeluarkan pemain lain).
                             let _leavingPid = currentPlayer ? currentPlayer.id : null;
+                            // [FIX LOG KELUAR] currentPlayer socket ini bisa saja bukan pemain di room tujuan;
+                            // jika begitu, abaikan agar jatuh ke pencarian lewat playerId/userUid di bawah.
+                            if (_leavingPid && !data.isSpectator && !room.gameEngine.getPlayerById(_leavingPid)) _leavingPid = null;
                             if (!_leavingPid && !data.isSpectator && data.playerId && data.userUid) {
                                 const _gp = room.gameEngine.getPlayerById(data.playerId);
                                 if (_gp && !_gp.isBot && _gp.userUid && _gp.userUid === data.userUid) _leavingPid = _gp.id;
+                            }
+                            // [FIX LOG KELUAR] Cadangan terakhir: cari lewat userUid saja (pola yang sama dengan
+                            // _releaseLeftRoomsForUser). Identitas tetap hanya milik userUid pengirim.
+                            if (!_leavingPid && !data.isSpectator && data.userUid && data.userUid !== 'BOT') {
+                                const _gpByUid = room.gameEngine.gs.players.find(p => !p.isBot && p.userUid && p.userUid === data.userUid && !p.leftMatch);
+                                if (_gpByUid) _leavingPid = _gpByUid.id;
                             }
                             if (data.isSpectator) {
                                 _leaveResult = 'left';
@@ -4174,9 +4184,12 @@ wss.on('connection', (socket) => {
                                 _leaveResult = 'left';
                                 const allLeft = room.gameEngine.markPlayerLeft(_leavingPid);
                                 if (allLeft) { room.status = 'finished'; room.finishedAt = Date.now(); }
+                                // [FIX LOG KELUAR] Putuskan hubungan socket ini dengan room lama (sebelumnya hanya
+                                // dilakukan untuk penonton) agar tidak muncul "Sudah berada di room lain".
+                                if (currentCustomRoomId === data.roomId) currentCustomRoomId = null;
                                 console.log(`🐛[LEAVE_MATCH] DIPROSES (pemain) allLeft=${allLeft} currentCustomRoomId(sesudah)=${currentCustomRoomId || 'null'}`);
                             } else {
-                                console.log(`🐛[LEAVE_MATCH] DI-SKIP: bukan spectator & currentPlayer kosong`);
+                                console.log(`🐛[LEAVE_MATCH] DI-SKIP: pemain tidak ditemukan di room ${data.roomId} (playerId=${data.playerId || 'N/A'} userUid=${data.userUid || 'N/A'}) -> dianggap sudah tidak terhubung`);
                             }
                         } else {
                             if (room) _leaveResult = 'retry'; // room ada tapi status belum 'playing'/'finished' (mis. 'starting')
@@ -4190,6 +4203,7 @@ wss.on('connection', (socket) => {
                     // satu penyebab pemain "nyasar" balik ke room lama saat bikin lobi baru.
                     // Pesan ini murni tambahan; client lama yang belum mengenalinya akan
                     // mengabaikannya begitu saja (tidak ada case untuk tipe ini di switch-nya).
+                    console.log(`🚪[LEAVE_MATCH] hasil=${_leaveResult} room=${data.roomId || 'N/A'} userUid=${data.userUid || 'N/A'}`);
                     if (socket.readyState === WebSocket.OPEN) {
                         try { socket.send(JSON.stringify({ type: 'LEAVE_MATCH_ACK', roomId: data.roomId || null, result: _leaveResult })); } catch(_) {}
                     }
