@@ -629,6 +629,24 @@ const BOT_L3_MATCH_BONUS   = 0.10;
 //      (setiap tingkatan di bawah ini masih punya minimal 1 kartu yang bisa dibagikan).
 const ADJUST_BELOW_LEVEL = 8;
 const ADJUST_REQUIRED_RARITIES = ['rareplus','rarestar','rare','uncommon','uncommonplus','commonplus','common']; // Elite, Spesial, Langka, Unik, Umum, Biasa, Dasar
+// ── MODE OTOMATIS: peluang kartu cocok naik per 2 kali Tambah Kartu ──
+// Selama mode otomatis aktif, tiap nilai peluang bertahan AUTO_STEP_DRAWS (2) kali Tambah Kartu baru naik:
+//   Tambah Kartu ke-1,2 = 1% | ke-3,4 = 34,4% | ke-5,6 = 54,2% | ke-7 dst = 74% (batas atas)
+// Nilai 34,4% / 54,2% / 74% berasal dari tangga normal (59,4% / 79,2% / 99%) dikurangi AUTO_MATCH_PENALTY.
+const AUTO_STEP_DRAWS = 2;
+// ── BUFF BOT LEVEL 3 ──
+// Mode Tantang (custom room): buff bot Lv3 SELALU aktif.
+// Mode Peringkat: buff aktif hanya jika ada pemain yang memenuhi salah satu syarat berikut:
+//   a) menang #1 berturut-turut sebanyak BUFF_RANK1_STREAK kali (default 2), atau
+//   b) peringkat #1 sampai #3 berturut-turut sebanyak BUFF_TOP3_STREAK kali (default 5), atau
+//   c) sudah BUFF_WINS_NEEDED kali menang (default 8) sejak reset terakhir.
+//      Setelah pemain bertemu bot Lv3 yang di-buff, hitungan menang ini di-reset ke 0.
+// "Menang" untuk hitungan (c) = peringkat <= BUFF_WIN_MAX_RANK (3 = #1 sampai #3 dihitung menang, tidak harus berturut-turut; ubah ke 1 jika hanya #1).
+const BUFF_RANK1_STREAK = 2;
+const BUFF_TOP3_STREAK  = 5;
+const BUFF_WINS_NEEDED  = 8;
+const BUFF_WIN_MAX_RANK = 3;
+const buffResetPending  = new Set(); // userUid yang hitungan menangnya di-reset saat match ini selesai
 const LEVEL_NAMES = { 1:'Lv1', 2:'Lv2', 3:'Lv3', 4:'Lv4', 5:'Lv5', 6:'Lv6', 7:'Lv7', 8:'Lv8', 9:'Lv9', 10:'Lv10', 11:'Lv11', 12:'Lv12' };
 
 function calcDrawLevel(drawCount) {
@@ -880,6 +898,7 @@ async function savePlayerStats(userUid, playerName, position) {
         });
         let _updatedStats = null;
         let _currentStreak = 0;
+        const _resetBuffCounter = buffResetPending.has(userUid);
         const statsOk = await fbTransaction(`${base}/stats`, (s) => {
             if (!s) s = { totalMatches: 0, rank1: 0, rank2: 0, rank3: 0, rank4: 0, winStreak: 0 };
             s.totalMatches = (s.totalMatches || 0) + 1;
@@ -891,9 +910,14 @@ async function savePlayerStats(userUid, playerName, position) {
                 s.winStreak = 0;
             }
             _currentStreak = s.winStreak;
+            // [BUFF BOT LV3] hitung #1 berturut-turut dan jumlah menang sejak reset
+            s.rank1Streak = position === 1 ? (s.rank1Streak || 0) + 1 : 0;
+            if (_resetBuffCounter) s.winsSinceBuff = 0;
+            else if (position <= BUFF_WIN_MAX_RANK) s.winsSinceBuff = (s.winsSinceBuff || 0) + 1;
             _updatedStats = { ...s };
             return s;
         });
+        if (statsOk && _resetBuffCounter) buffResetPending.delete(userUid);
         let histOk = false;
         for (let hi = 0; hi < 3 && !histOk; hi++) {
             if (hi > 0) await new Promise(r => setTimeout(r, 800));
@@ -1216,12 +1240,23 @@ class GameEngine {
         const _adjustActive = (player.drawLevel ?? 1) < ADJUST_BELOW_LEVEL
             && ADJUST_REQUIRED_RARITIES.every(r => availableCards.some(c => c.rarity === r));
         const _penalized = _adjustActive && !!player.autoMode && !player.isBot && (!AUTO_PENALTY_ONLY_AFK || player.autoReason === 'AFK');
-        let effectiveProb = _penalized ? Math.max(MIN_ADJUSTED_MATCH_PROB, prob - AUTO_MATCH_PENALTY) : prob;
+        const _l3BuffOn = (this.botL3BuffEnabled ?? this.isCustomRoom) === true;
+        let effectiveProb = prob;
+        if (_penalized) {
+            // Mode otomatis: peluang naik satu anak tangga setiap AUTO_STEP_DRAWS (2) kali Tambah Kartu
+            player.autoDrawCount = (player.autoDrawCount || 0) + 1;
+            const _autoStep   = Math.ceil(player.autoDrawCount / AUTO_STEP_DRAWS);   // 1,1,2,2,3,3,4,4,...
+            const _autoLadder = _autoStep <= 1
+                ? MIN_ADJUSTED_MATCH_PROB
+                : Math.min(0.99, 0.198 * (_autoStep + 1)) - AUTO_MATCH_PENALTY;      // 34,4% -> 54,2% -> 74%
+            // tidak pernah lebih tinggi dari peluang normal dikurangi hukuman
+            effectiveProb = Math.max(MIN_ADJUSTED_MATCH_PROB, Math.min(_autoLadder, prob - AUTO_MATCH_PENALTY));
+        }
         // [LEVEL BOT] Lv1 dikurangi, Lv2 normal, Lv3 ditambah (maks 99%). Nilai dasar drawProb tidak berubah.
         if (player.isBot && _adjustActive) {
             const _bl = player.botLevel ?? 1;
             if (_bl === 1)      effectiveProb = Math.max(MIN_ADJUSTED_MATCH_PROB, prob - BOT_L1_MATCH_PENALTY);
-            else if (_bl === 3) effectiveProb = Math.min(0.99, prob + BOT_L3_MATCH_BONUS);
+            else if (_bl === 3 && _l3BuffOn) effectiveProb = Math.min(0.99, prob + BOT_L3_MATCH_BONUS);
         }
         const useMatching = matchingCards.length > 0 && Math.random() < effectiveProb;
 
@@ -1312,7 +1347,7 @@ class GameEngine {
         const isMatch  = chosen.province === this.gs.currentProvince;
         // Sembunyikan angka persen di log untuk pemain mode otomatis & bot level 1/3 (peluangnya sudah disesuaikan),
         // supaya angka yang tampil tidak menyesatkan. Bot level 2 dan pemain normal tetap menampilkan angka dasar.
-        const _hideProbInLog = _penalized || (_adjustActive && player.isBot && (player.botLevel ?? 1) !== 2);
+        const _hideProbInLog = _penalized || (_adjustActive && player.isBot && ((player.botLevel ?? 1) === 1 || ((player.botLevel ?? 1) === 3 && _l3BuffOn)));
         const modeStr  = _hideProbInLog
             ? (useMatching ? '✅ Cocok' : '❌ Non-Cocok')
             : (useMatching ? `✅ Cocok [prob ${probPct}%]` : `❌ Non-Cocok [prob ${probPct}%]`);
@@ -2977,6 +3012,7 @@ class GameEngine {
     setPlayerAutoMode(playerId, enabled, reason = 'disconnect') {
         const player = this.gs.players.find(p => p.id === playerId);
         if (!player || player.isBot || player.winner) return;
+        if (!!player.autoMode !== !!enabled) player.autoDrawCount = 0; // hitungan 2 Tambah Kartu mulai ulang tiap mode otomatis berubah
         player.autoMode = enabled;
         player.autoReason = enabled ? reason : undefined; // dipakai hukuman AFK di dealCard()
         if (enabled) {
@@ -3213,6 +3249,8 @@ class MatchmakingQueue {
         let hasStreakPlayer = false; // ada pemain dengan winStreak >= 4
         let streakPlayerName = '';
         const playerRankMap = {};
+        const _buffTriggerReasons = [];
+        const _buffResetUids = [];
         if (botCount > 0 || players.length > 0) {
             try {
                 const [rankResults, statsResults] = await Promise.all([
@@ -3238,6 +3276,18 @@ class MatchmakingQueue {
                         }
                     }
                 }
+                // [BUFF BOT LV3 - PERINGKAT] cek syarat tiap pemain
+                for (let i = 0; i < statsResults.length; i++) {
+                    const st = statsResults[i];
+                    if (!st) continue;
+                    const nm = players[i].name;
+                    if ((st.rank1Streak || 0) >= BUFF_RANK1_STREAK) _buffTriggerReasons.push(`${nm}: ${st.rank1Streak}x #1 berturut-turut`);
+                    if ((st.winStreak || 0) >= BUFF_TOP3_STREAK) _buffTriggerReasons.push(`${nm}: ${st.winStreak}x #1-#3 berturut-turut`);
+                    if ((st.winsSinceBuff || 0) >= BUFF_WINS_NEEDED) {
+                        _buffTriggerReasons.push(`${nm}: ${st.winsSinceBuff}x menang sejak reset`);
+                        if (players[i].userUid) _buffResetUids.push(players[i].userUid);
+                    }
+                }
             } catch (e) { console.warn("⚠️ Gagal fetch rank/stats untuk bot level:", e); }
         }
         const botLevelLabel = botLevel === 3 ? 'Level 3 (Platinum)' : botLevel === 2 ? 'Level 2 (Gold/Diamond)' : 'Level 1 (Bronze/Silver)';
@@ -3259,6 +3309,11 @@ class MatchmakingQueue {
             gameEngine.addBot(bName, thisBotLevel);
             addedBots.push(`${bName}(Lv${thisBotLevel})`);
         }
+        // [BUFF BOT LV3 - PERINGKAT] aktif hanya jika ada syarat terpenuhi DAN ada bot Lv3 di match ini
+        const _hasL3Bot = addedBots.some(b => b.endsWith('(Lv3)'));
+        gameEngine.botL3BuffEnabled = _buffTriggerReasons.length > 0 && _hasL3Bot;
+        if (gameEngine.botL3BuffEnabled) _buffResetUids.forEach(uid => buffResetPending.add(uid));
+        console.log(`   ⚡ Buff bot Lv3   : ${gameEngine.botL3BuffEnabled ? 'AKTIF (' + _buffTriggerReasons.join('; ') + ')' : 'tidak aktif' + (_buffTriggerReasons.length && !_hasL3Bot ? ' (syarat terpenuhi tapi tidak ada bot Lv3)' : '')}`);
         console.log(`🤖 BOT CHECK — Room: ${roomId} | botCount: ${botCount}`);
         if (botCount > 0) {
             console.log(`   📌 Jumlah bot    : ${botCount}`);
@@ -3540,6 +3595,7 @@ class MatchmakingQueue {
         try {
             const gameEngine = new GameEngine(roomId);
             gameEngine.isCustomRoom = true;
+            gameEngine.botL3BuffEnabled = true; // Mode Tantang: buff bot Lv3 selalu aktif
             gameEngine.hostUserUid = room.hostUid || null; // Set host UID untuk fitur pause
             if (room.spectatorSocket) gameEngine.addSpectator(room.spectatorSocket, room.spectatorUid);
             const MANDATORY_PROVINCE = 'Bangka Belitung';
