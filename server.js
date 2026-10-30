@@ -608,6 +608,18 @@ const DRAW_RATES = {
     12: { magis:19, sakral:16, mythic:13, legendary:11, epic:10, rareplus:8, rarestar:7, rare:6, uncommon:4, uncommonplus:3, commonplus:2, common:1 }
 };
 const RARITY_ORDER = ['magis','sakral','mythic','legendary','epic','rareplus','rarestar','rare','uncommon','uncommonplus','commonplus','common'];
+// ── HUKUMAN AFK (di belakang layar, tidak ditampilkan ke pemain) ──
+// Pemain yang masuk mode otomatis karena AFK mendapat peluang kartu cocok (saat Tambah Kartu)
+// dikurangi 15 poin persen. Contoh: 19,8% jadi 4,8%; 99% jadi 84%. Nilai dasar drawProb TIDAK berubah,
+// pengurangan hanya dipakai saat undian kartu cocok di dealCard().
+const AUTO_MATCH_PENALTY = 0.15;
+// true  = hanya berlaku untuk mode otomatis karena AFK (tidak bergerak).
+// false = berlaku untuk semua mode otomatis, termasuk koneksi terputus.
+const AUTO_PENALTY_ONLY_AFK = false;
+// ── PENYESUAIAN PELUANG KARTU COCOK PER LEVEL BOT (di belakang layar) ──
+// Bot Lv1 di-nerf (-10 poin persen), Bot Lv2 normal, Bot Lv3 di-buff (+10 poin persen, maksimal 99%).
+const BOT_L1_MATCH_PENALTY = 0.10;
+const BOT_L3_MATCH_BONUS   = 0.10;
 const LEVEL_NAMES = { 1:'Lv1', 2:'Lv2', 3:'Lv3', 4:'Lv4', 5:'Lv5', 6:'Lv6', 7:'Lv7', 8:'Lv8', 9:'Lv9', 10:'Lv10', 11:'Lv11', 12:'Lv12' };
 
 function calcDrawLevel(drawCount) {
@@ -1190,7 +1202,16 @@ class GameEngine {
         const nonMatchingCards = availableCards.filter(c => c.province !== this.gs.currentProvince);
 
         // Tentukan apakah draw ini akan dapat kartu satu provinsi dengan top card
-        const useMatching = matchingCards.length > 0 && Math.random() < prob;
+        // [HUKUMAN AFK] kurangi peluang efektif untuk pemain mode otomatis (tidak mengubah drawProb dasar)
+        const _penalized = !!player.autoMode && !player.isBot && (!AUTO_PENALTY_ONLY_AFK || player.autoReason === 'AFK');
+        let effectiveProb = _penalized ? Math.max(0, prob - AUTO_MATCH_PENALTY) : prob;
+        // [LEVEL BOT] Lv1 dikurangi, Lv2 normal, Lv3 ditambah (maks 99%). Nilai dasar drawProb tidak berubah.
+        if (player.isBot) {
+            const _bl = player.botLevel ?? 1;
+            if (_bl === 1)      effectiveProb = Math.max(0, prob - BOT_L1_MATCH_PENALTY);
+            else if (_bl === 3) effectiveProb = Math.min(0.99, prob + BOT_L3_MATCH_BONUS);
+        }
+        const useMatching = matchingCards.length > 0 && Math.random() < effectiveProb;
 
         const level = player.drawLevel ?? 1;
         const rateTable = DRAW_RATES[level] ?? DRAW_RATES[1];
@@ -1277,7 +1298,12 @@ class GameEngine {
         }
         const probPct  = Math.round(prob * 100);
         const isMatch  = chosen.province === this.gs.currentProvince;
-        const modeStr  = useMatching ? `✅ Cocok [prob ${probPct}%]` : `❌ Non-Cocok [prob ${probPct}%]`;
+        // Sembunyikan angka persen di log untuk pemain mode otomatis & bot level 1/3 (peluangnya sudah disesuaikan),
+        // supaya angka yang tampil tidak menyesatkan. Bot level 2 dan pemain normal tetap menampilkan angka dasar.
+        const _hideProbInLog = _penalized || (player.isBot && (player.botLevel ?? 1) !== 2);
+        const modeStr  = _hideProbInLog
+            ? (useMatching ? '✅ Cocok' : '❌ Non-Cocok')
+            : (useMatching ? `✅ Cocok [prob ${probPct}%]` : `❌ Non-Cocok [prob ${probPct}%]`);
         this.broadcastLog(`🎴 ${player.name} [${LEVEL_NAMES[level]}] tambah kartu ${modeStr}`);
         if (!player.isBot) this.sendToPlayer(player.id, { type: 'LOG', message: `🎴 Kamu [${LEVEL_NAMES[level]}] tambah kartu: ${chosen.name} (${chosen.rarity}/${chosen.province}) ${modeStr}` });
         return true;
@@ -2940,6 +2966,7 @@ class GameEngine {
         const player = this.gs.players.find(p => p.id === playerId);
         if (!player || player.isBot || player.winner) return;
         player.autoMode = enabled;
+        player.autoReason = enabled ? reason : undefined; // dipakai hukuman AFK di dealCard()
         if (enabled) {
             player.disconnectedAt = Date.now();
             console.log(`👤 AUTO-MODE ON: ${player.name}`);
