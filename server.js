@@ -1478,16 +1478,8 @@ class GameEngine {
         this.logDrawLevels();
         if (this.gs.round === 1) {
             // [VOTING TAHAP 1] Ronde pertama: belum ada riwayat, semua pemain aktif berhak → voting
-            // [FIX] Tunggu animasi pembagian kartu awal di client selesai dulu (client menunda 500ms
-            // sebelum menampilkan kartu + animasi bagi ~2000ms) baru popup voting & timer 10 detik mulai.
-            // Hanya ronde 1 — di ronde berikutnya tidak ada animasi bagi kartu awal, jadi tetap 800ms.
             this.broadcastGameState();
-            const startVotingWhenReady = () => {
-                if (this.gs.gameOver) return;
-                if (this.gs.isPaused) { setTimeout(startVotingWhenReady, 500); return; } // tunggu resume (custom room)
-                this.startPhase1Voting();
-            };
-            setTimeout(startVotingWhenReady, 2500);
+            setTimeout(() => this.startPhase1Voting(), 800);
             return;
         }
         const lastRound = this.gs.roundHistory[this.gs.roundHistory.length - 1];
