@@ -1014,8 +1014,9 @@ async function savePlayerStats(userUid, playerName, position) {
             return s;
         });
         if (statsOk && _resetBuffCounter) buffResetPending.delete(userUid);
-        // [SEASON] Statistik season berjalan (sebagai TAMBAHAN; /stats lama tetap = statistik semua season)
-        if (_season.id >= 1) {
+        // [SEASON] Statistik season berjalan (sebagai TAMBAHAN; /stats lama tetap = statistik semua season).
+        // Pra-season (id 0) juga dicatat, di /seasonStats/0, supaya pemain bisa melihat statistik "Pra-Season".
+        if (_season.id >= 0) {
             try {
                 await fbTransaction(`${base}/seasonStats/${_season.id}`, (s) => {
                     if (!s) s = { totalMatches: 0, rank1: 0, rank2: 0, rank3: 0, rank4: 0 };
