@@ -891,6 +891,28 @@ async function fbRead(path) {
 }
 
 // =============================================
+// SEASON SYSTEM (reset rank tiap 3 bulan)
+// =============================================
+// Season dihitung dari TANGGAL (bukan dari kapan server di-deploy), jadi semua server
+// (Railway & Deno) yang memakai konstanta ini selalu menghasilkan nomor season yang sama.
+// Season 1 mulai 1 Januari 2027 00:00 WIB (= 31 Des 2026 17:00 UTC), lalu berganti tiap 3 bulan
+// (1 Apr, 1 Jul, 1 Okt, 1 Jan, ...). Sebelum Season 1 → id 0 ("pra-season"), TIDAK ada reset.
+// !! Konstanta ini WAJIB sama persis di server Railway, server Deno, dan client (index.html).
+const SEASON_START_MS = Date.UTC(2026, 11, 31, 17, 0, 0);
+const SEASON_WIB_OFFSET_MS = 7 * 3600 * 1000;
+function getSeasonInfo(nowMs = Date.now()) {
+    if (nowMs < SEASON_START_MS) return { id: 0, startAt: null, endAt: SEASON_START_MS };
+    const d = new Date(nowMs + SEASON_WIB_OFFSET_MS);
+    const y = d.getUTCFullYear();
+    const qStartMonth = Math.floor(d.getUTCMonth() / 3) * 3;
+    return {
+        id: (y - 2027) * 4 + Math.floor(d.getUTCMonth() / 3) + 1,
+        startAt: Date.UTC(y, qStartMonth, 1) - SEASON_WIB_OFFSET_MS,
+        endAt:   Date.UTC(y, qStartMonth + 3, 1) - SEASON_WIB_OFFSET_MS
+    };
+}
+
+// =============================================
 // RANK SYSTEM
 // =============================================
 const RANKS = [
@@ -927,8 +949,16 @@ async function savePlayerStats(userUid, playerName, position) {
         const base = `/users/${userUid}`;
         let _rankBefore = "Bronze III", _rankAfter = "Bronze III", _ptsChange = 0, _ptsBefore = 0, _ptsAfter = 0;
         let _peakRank = "Bronze III";
+        const _season = getSeasonInfo();
+        let _seasonArchive = null;
         const rankOk = await fbTransaction(`${base}/rankData`, (r) => {
-            if (!r) r = { rankName: "Bronze III", points: 0, peakRank: "Bronze III", peakRankIndex: 0 };
+            if (!r) r = { rankName: "Bronze III", points: 0, peakRank: "Bronze III", peakRankIndex: 0, seasonId: _season.id };
+            // [SEASON] Season berganti → reset HANYA rank saat ini ke Bronze III 0 poin. peakRank/statistik tidak disentuh.
+            _seasonArchive = null;
+            if ((r.seasonId || 0) !== _season.id) {
+                _seasonArchive = { seasonId: r.seasonId || 0, rankName: r.rankName || "Bronze III", points: r.points || 0, peakRank: r.peakRank || "Bronze III", archivedAt: Date.now() };
+                r.rankName = "Bronze III"; r.points = 0; r.seasonId = _season.id;
+            }
             _rankBefore = r.rankName || "Bronze III";
             _ptsBefore  = r.points   || 0;
             _ptsChange  = RANK_CHANGES[rankTier(_rankBefore)][position - 1];
@@ -945,6 +975,23 @@ async function savePlayerStats(userUid, playerName, position) {
             _peakRank = r.peakRank || res.name;
             return r;
         });
+        if (rankOk && _seasonArchive) {
+            // Arsipkan rank season sebelumnya (hanya catatan; gagal tidak boleh mengganggu penyimpanan hasil match)
+            await fbSet(`${base}/seasonHistory/${_seasonArchive.seasonId}`, _seasonArchive).catch(() => {});
+            // [MAHARAJA] Catat rank akhir season ke daftar datar /seasonFinal (dipakai menetapkan juara season).
+            // Dibungkus try/catch: kegagalan di sini tidak boleh mengganggu penyimpanan hasil match.
+            try {
+                if (_seasonArchive.seasonId >= 1 && !(_seasonArchive.rankName === "Bronze III" && _seasonArchive.points === 0)) {
+                    const _oldLb = await fbRead(`/leaderboard/${userUid}`).catch(() => null);
+                    const _sameSeasonLb = _oldLb && (_oldLb.seasonId || 0) === _seasonArchive.seasonId;
+                    await fbSet(`/seasonFinal/${_seasonArchive.seasonId}/${userUid}`, {
+                        name: playerName || (_oldLb && _oldLb.name) || "Pemain",
+                        rankName: _seasonArchive.rankName, points: _seasonArchive.points,
+                        updatedAt: (_sameSeasonLb && _oldLb.updatedAt) || Date.now()
+                    }).catch(() => {});
+                }
+            } catch (e) { console.error(`⚠️ seasonFinal uid=${userUid}:`, e); }
+        }
         let _updatedStats = null;
         let _currentStreak = 0;
         const _resetBuffCounter = buffResetPending.has(userUid);
@@ -967,6 +1014,17 @@ async function savePlayerStats(userUid, playerName, position) {
             return s;
         });
         if (statsOk && _resetBuffCounter) buffResetPending.delete(userUid);
+        // [SEASON] Statistik season berjalan (sebagai TAMBAHAN; /stats lama tetap = statistik semua season)
+        if (_season.id >= 1) {
+            try {
+                await fbTransaction(`${base}/seasonStats/${_season.id}`, (s) => {
+                    if (!s) s = { totalMatches: 0, rank1: 0, rank2: 0, rank3: 0, rank4: 0 };
+                    s.totalMatches = (s.totalMatches || 0) + 1;
+                    s[`rank${position}`] = (s[`rank${position}`] || 0) + 1;
+                    return s;
+                });
+            } catch (e) { console.error(`⚠️ seasonStats uid=${userUid}:`, e); }
+        }
         let histOk = false;
         for (let hi = 0; hi < 3 && !histOk; hi++) {
             if (hi > 0) await new Promise(r => setTimeout(r, 800));
@@ -985,6 +1043,7 @@ async function savePlayerStats(userUid, playerName, position) {
             rankName: _finalRankName,
             points:   _finalPts,
             peakRank: _finalPeakRank,
+            seasonId: _season.id,
             totalMatches: _updatedStats?.totalMatches ?? 0,
             rank1: _updatedStats?.rank1 ?? 0,
             rank2: _updatedStats?.rank2 ?? 0,
@@ -1000,6 +1059,134 @@ async function savePlayerStats(userUid, playerName, position) {
         return false;
     }
 }
+
+// [SEASON] Reset otomatis saat pergantian season. Idempoten: tiap pemain di-reset lewat transaksi yang
+// mengecek seasonId, jadi aman walau Railway & Deno menjalankannya bersamaan atau diulang. Server yang
+// hidup lebih dulu setelah pergantian season yang mengerjakannya; penanda selesai di /config/seasonSwept.
+// Tanpa sweeper pun, rank tetap ter-reset saat pemain bermain (lihat savePlayerStats).
+let _lastSweptSeason = 0;
+let _seasonSweepRunning = false;
+async function _runPool(items, limit, fn) {
+    let i = 0;
+    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+        while (i < items.length) {
+            const item = items[i++];
+            try { await fn(item); } catch (e) { console.error('⚠️ seasonSweep item error:', e); }
+        }
+    });
+    await Promise.all(workers);
+}
+// [MAHARAJA] Juara season = peringkat #1 di akhir season (rank tertinggi, lalu poin, lalu yang lebih dulu mencapainya),
+// dengan syarat minimal SEASON_CHAMPION_MIN_MATCHES pertandingan di season itu. Idempoten & aman dijalankan dua server.
+const SEASON_CHAMPION_MIN_MATCHES = 20;
+async function _fbReadStrict(path) {
+    const token = await fbGetToken();
+    if (!token) throw new Error('Firebase token tidak tersedia');
+    const res = await fetch(`${FB_DB_URL}${path}.json`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) throw new Error(`fbReadStrict ${path} → ${res.status}`);
+    return await res.json();
+}
+async function awardSeasonChampion(endedId) {
+    if (endedId < 1) return; // pra-season (id 0) tidak punya juara
+    let rec = await _fbReadStrict(`/seasonChampions/${endedId}`);
+    if (!rec) {
+        const finals = await _fbReadStrict(`/seasonFinal/${endedId}`);
+        const cands = Object.entries(finals || {}).map(([uid, d]) => ({
+            uid, name: d.name, rankName: d.rankName || "Bronze III", points: d.points || 0,
+            idx: RANKS.indexOf(d.rankName || "Bronze III"), updatedAt: d.updatedAt || Number.MAX_SAFE_INTEGER
+        })).sort((a, b) => (b.idx - a.idx) || (b.points - a.points) || (a.updatedAt - b.updatedAt) || (a.uid < b.uid ? -1 : 1));
+        for (const c of cands) {
+            const m = Number(await _fbReadStrict(`/users/${c.uid}/seasonStats/${endedId}/totalMatches`)) || 0;
+            if (m < SEASON_CHAMPION_MIN_MATCHES) continue; // belum cukup main → lewati ke peringkat berikutnya
+            const proposal = { uid: c.uid, name: c.name || "Pemain", rankName: c.rankName, points: c.points, matches: m, awardedAt: Date.now() };
+            await fbTransaction(`/seasonChampions/${endedId}`, (cur) => cur ? undefined : proposal); // hanya tulis jika belum ada
+            rec = await _fbReadStrict(`/seasonChampions/${endedId}`);
+            break;
+        }
+        if (!rec) { console.log(`ℹ️ Season ${endedId}: tidak ada juara (tidak ada pemain yang memenuhi syarat)`); return; }
+    }
+    const ok = await fbSet(`/users/${rec.uid}/seasonChampion/${endedId}`, {
+        seasonId: endedId, rankName: rec.rankName, points: rec.points, matches: rec.matches, awardedAt: rec.awardedAt
+    });
+    if (!ok) throw new Error('gagal menulis seasonChampion pemain');
+    console.log(`👑 Juara Season ${endedId}: ${rec.name} (${rec.rankName} ${rec.points} poin, ${rec.matches} match)`);
+}
+
+async function seasonSweepIfNeeded() {
+    if (_seasonSweepRunning || !fbServiceAccount) return;
+    const season = getSeasonInfo();
+    if (season.id < 1 || _lastSweptSeason === season.id) return;
+    _seasonSweepRunning = true;
+    try {
+        const done = await fbRead('/config/seasonSwept');
+        if (done === season.id) { _lastSweptSeason = season.id; return; }
+        // Kunci ringan agar dua server tidak mengerjakan hal yang sama bersamaan (kunci kedaluwarsa 30 menit)
+        let acquired = false;
+        const nowTs = Date.now();
+        const lockOk = await fbTransaction('/config/seasonSweepLock', (cur) => {
+            acquired = false;
+            if (cur && cur.seasonId === season.id && (nowTs - (cur.ts || 0)) < 30 * 60 * 1000 && cur.by !== SERVER_ID) return undefined;
+            acquired = true;
+            return { seasonId: season.id, by: SERVER_ID, ts: nowTs };
+        });
+        if (!lockOk || !acquired) return;
+        console.log(`🗓️ Season sweep dimulai untuk Season ${season.id}`);
+        const token = await fbGetToken();
+        if (!token) return;
+        const usersRes = await fetch(`${FB_DB_URL}/users.json?shallow=true`, { headers: { Authorization: `Bearer ${token}` } });
+        if (!usersRes.ok) { console.error(`❌ seasonSweep gagal baca daftar user ${usersRes.status}`); return; }
+        const uids = Object.keys((await usersRes.json()) || {});
+        let resetCount = 0;
+        const lbBefore = (await fbRead('/leaderboard')) || {}; // untuk nama & waktu update (sebelum entri lama dibersihkan)
+        await _runPool(uids, 6, async (uid) => {
+            let archive = null;
+            const ok = await fbTransaction(`/users/${uid}/rankData`, (r) => {
+                archive = null;
+                if (!r) return undefined;                          // belum pernah punya rank → lewati
+                if ((r.seasonId || 0) === season.id) return undefined; // sudah di season ini (mis. sudah ter-reset lewat match)
+                archive = { seasonId: r.seasonId || 0, rankName: r.rankName || "Bronze III", points: r.points || 0, peakRank: r.peakRank || "Bronze III", archivedAt: Date.now() };
+                r.rankName = "Bronze III"; r.points = 0; r.seasonId = season.id;
+                return r;
+            });
+            if (ok && archive) {
+                resetCount++;
+                await fbSet(`/users/${uid}/seasonHistory/${archive.seasonId}`, archive);
+                if (archive.seasonId >= 1 && !(archive.rankName === "Bronze III" && archive.points === 0)) {
+                    const lbe = lbBefore[uid];
+                    const sameSeason = lbe && (lbe.seasonId || 0) === archive.seasonId;
+                    const finalRec = {
+                        name: (lbe && lbe.name) || "Pemain", rankName: archive.rankName, points: archive.points,
+                        updatedAt: (sameSeason && lbe.updatedAt) || archive.archivedAt
+                    };
+                    // Pemain ini sudah ter-reset (tidak akan diproses ulang bila sweep diulang), jadi coba ulang sampai 3x
+                    let finalOk = false;
+                    for (let t = 0; t < 3 && !finalOk; t++) {
+                        if (t > 0) await new Promise(r => setTimeout(r, 800));
+                        finalOk = await fbSet(`/seasonFinal/${archive.seasonId}/${uid}`, finalRec);
+                    }
+                    if (!finalOk) console.error(`❌ seasonFinal gagal ditulis uid=${uid} season=${archive.seasonId}`);
+                }
+            }
+        });
+        // [MAHARAJA] Semua rank akhir season lalu sudah tercatat di /seasonFinal → tetapkan juara. Jika gagal, sweep diulang.
+        await awardSeasonChampion(season.id - 1);
+        // Bersihkan papan peringkat: entri dari season lama dihapus (muncul lagi setelah pemain bermain di season baru)
+        const lb = await fbRead('/leaderboard');
+        const staleLb = Object.entries(lb || {}).filter(([uid, d]) => d && (d.seasonId || 0) !== season.id).map(([uid]) => uid);
+        await _runPool(staleLb, 6, async (uid) => {
+            await fbTransaction(`/leaderboard/${uid}`, (cur) => (cur && (cur.seasonId || 0) !== season.id) ? null : undefined);
+        });
+        await fbSet('/config/seasonSwept', season.id);
+        _lastSweptSeason = season.id;
+        console.log(`✅ Season sweep selesai: Season ${season.id}, ${resetCount} rank di-reset, ${staleLb.length} entri leaderboard dibersihkan`);
+    } catch (e) {
+        console.error('❌ seasonSweep error:', e);
+    } finally {
+        _seasonSweepRunning = false;
+    }
+}
+setTimeout(seasonSweepIfNeeded, 20000);
+setInterval(seasonSweepIfNeeded, 10 * 60 * 1000);
 
 async function saveProvinceStats(provinces, players, roomId, isCustomRoom) {
     if (!fbServiceAccount || provinces.length === 0) return;
@@ -3337,6 +3524,7 @@ class MatchmakingQueue {
                 for (let i = 0; i < rankResults.length; i++) {
                     const rd = rankResults[i];
                     if (!rd?.rankName) continue;
+                    if ((rd.seasonId || 0) !== getSeasonInfo().id) continue; // [SEASON] rank season lama (belum ter-reset) diabaikan
                     playerRankMap[players[i].name] = rd.rankName;
                     if (rd.rankName.startsWith("Platinum")) { hasPlatinum = true; }
                     if ((rd.rankName.startsWith("Gold") || rd.rankName.startsWith("Diamond")) && botLevel < 2) botLevel = 2;
@@ -4005,7 +4193,8 @@ app.get('/leaderboard', async (req, res) => {
     if (!fbRes.ok) return res.status(502).json({ error: "Failed to fetch leaderboard" });
     const raw = await fbRes.json();
     if (!raw) return res.json([]);
-    const entries = Object.entries(raw).map(([uid, d]) => ({ uid, name: d.name, rankName: d.rankName, points: d.points, peakRank: d.peakRank, updatedAt: d.updatedAt }));
+    const _curSeasonId = getSeasonInfo().id;
+    const entries = Object.entries(raw).filter(([uid, d]) => d && (d.seasonId || 0) === _curSeasonId).map(([uid, d]) => ({ uid, name: d.name, rankName: d.rankName, points: d.points, peakRank: d.peakRank, updatedAt: d.updatedAt }));
     entries.sort((a, b) => {
         const ai = RANKS.indexOf(a.rankName ?? "Bronze III");
         const bi = RANKS.indexOf(b.rankName ?? "Bronze III");
