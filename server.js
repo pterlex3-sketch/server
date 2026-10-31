@@ -1018,12 +1018,19 @@ async function savePlayerStats(userUid, playerName, position) {
         // Pra-season (id 0) juga dicatat, di /seasonStats/0, supaya pemain bisa melihat statistik "Pra-Season".
         if (_season.id >= 0) {
             try {
-                await fbTransaction(`${base}/seasonStats/${_season.id}`, (s) => {
+                // [FIX] Cek hasil transaksi (fbTransaction tidak melempar error) + coba ulang sekali, lalu log.
+                const _ssUpdate = (s) => {
                     if (!s) s = { totalMatches: 0, rank1: 0, rank2: 0, rank3: 0, rank4: 0 };
                     s.totalMatches = (s.totalMatches || 0) + 1;
                     s[`rank${position}`] = (s[`rank${position}`] || 0) + 1;
                     return s;
-                });
+                };
+                let _ssOk = await fbTransaction(`${base}/seasonStats/${_season.id}`, _ssUpdate);
+                if (!_ssOk) {
+                    await new Promise(r => setTimeout(r, 800));
+                    _ssOk = await fbTransaction(`${base}/seasonStats/${_season.id}`, _ssUpdate);
+                }
+                console.log(`${_ssOk ? "✅" : "❌"} seasonStats uid=${userUid} season=${_season.id} pos=${position} ok=${_ssOk}`);
             } catch (e) { console.error(`⚠️ seasonStats uid=${userUid}:`, e); }
         }
         let histOk = false;
