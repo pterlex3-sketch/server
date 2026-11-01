@@ -1093,8 +1093,8 @@ async function _runPool(items, limit, fn) {
     await Promise.all(workers);
 }
 // [MAHARAJA] Juara season = peringkat #1 di akhir season (rank tertinggi, lalu poin, lalu yang lebih dulu mencapainya),
-// dengan syarat minimal SEASON_CHAMPION_MIN_MATCHES pertandingan di season itu. Idempoten & aman dijalankan dua server.
-const SEASON_CHAMPION_MIN_MATCHES = 20;
+// Tanpa syarat minimal pertandingan (SEASON_CHAMPION_MIN_MATCHES = 0; isi angka lagi jika ingin syarat itu kembali). Idempoten & aman dijalankan dua server.
+const SEASON_CHAMPION_MIN_MATCHES = 0;
 async function _fbReadStrict(path) {
     const token = await fbGetToken();
     if (!token) throw new Error('Firebase token tidak tersedia');
@@ -1153,6 +1153,7 @@ async function seasonSweepIfNeeded() {
         if (!usersRes.ok) { console.error(`❌ seasonSweep gagal baca daftar user ${usersRes.status}`); return; }
         const uids = Object.keys((await usersRes.json()) || {});
         let resetCount = 0;
+        const _archivedSeasons = new Set(); // musim-musim yang rank akhirnya diarsipkan di sweep ini
         const lbBefore = (await fbRead('/leaderboard')) || {}; // untuk nama & waktu update (sebelum entri lama dibersihkan)
         await _runPool(uids, 6, async (uid) => {
             let archive = null;
@@ -1166,6 +1167,7 @@ async function seasonSweepIfNeeded() {
             });
             if (ok && archive) {
                 resetCount++;
+                _archivedSeasons.add(archive.seasonId);
                 await fbSet(`/users/${uid}/seasonHistory/${archive.seasonId}`, archive);
                 if (archive.seasonId >= 1 && !(archive.rankName === "Bronze III" && archive.points === 0)) {
                     const lbe = lbBefore[uid];
@@ -1185,7 +1187,17 @@ async function seasonSweepIfNeeded() {
             }
         });
         // [MAHARAJA] Semua rank akhir season lalu sudah tercatat di /seasonFinal → tetapkan juara. Jika gagal, sweep diulang.
-        await awardSeasonChampion(season.id - 1);
+        // [FIX] Tetapkan juara untuk SEMUA musim yang sudah berakhir dan punya catatan rank akhir, bukan hanya musim terakhir.
+        // Jika server tidak aktif selama beberapa musim, juara musim yang terlewat tetap ditetapkan. Aman diulang (juara yang sudah ada tidak ditulis ulang).
+        const _awardIds = new Set(_archivedSeasons);
+        _awardIds.add(season.id - 1);
+        try {
+            const sfRes = await fetch(`${FB_DB_URL}/seasonFinal.json?shallow=true`, { headers: { Authorization: `Bearer ${token}` } });
+            if (sfRes.ok) Object.keys((await sfRes.json()) || {}).forEach(k => _awardIds.add(Number(k)));
+        } catch (e) { console.error('⚠️ gagal baca daftar seasonFinal:', e); }
+        for (const sid of [..._awardIds].filter(n => Number.isInteger(n) && n >= 1 && n < season.id).sort((a, b) => a - b)) {
+            await awardSeasonChampion(sid);
+        }
         // Bersihkan papan peringkat: entri dari season lama dihapus (muncul lagi setelah pemain bermain di season baru)
         const lb = await fbRead('/leaderboard');
         const staleLb = Object.entries(lb || {}).filter(([uid, d]) => d && (d.seasonId || 0) !== season.id).map(([uid]) => uid);
