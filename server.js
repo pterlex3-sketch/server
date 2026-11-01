@@ -618,6 +618,11 @@ const MIN_ADJUSTED_MATCH_PROB = 0.01;
 // true  = hanya berlaku untuk mode otomatis karena AFK (tidak bergerak).
 // false = berlaku untuk semua mode otomatis, termasuk koneksi terputus.
 const AUTO_PENALTY_ONLY_AFK = false;
+// ── HUKUMAN LEVEL TAMBAH KARTU MODE OTOMATIS (di belakang layar, tidak ditampilkan ke pemain) ──
+// Selama mode otomatis aktif, level yang dipakai untuk undian rarity kartu dikurangi AUTO_LEVEL_PENALTY level
+// (minimal Lv1). Level asli (drawLevel) TIDAK berubah, jadi tampilan, log, kenaikan level, dan reset tetap normal.
+// Begitu mode otomatis nonaktif, hukuman ini langsung hilang. Ikut aturan AUTO_PENALTY_ONLY_AFK di atas.
+const AUTO_LEVEL_PENALTY = 5;
 // ── PENYESUAIAN PELUANG KARTU COCOK PER LEVEL BOT (di belakang layar) ──
 // Bot Lv1 di-nerf (-10 poin persen), Bot Lv2 normal, Bot Lv3 di-buff (+10 poin persen, maksimal 99%).
 const BOT_L1_MATCH_PENALTY = 0.10;
@@ -1505,7 +1510,10 @@ class GameEngine {
         const useMatching = matchingCards.length > 0 && Math.random() < effectiveProb;
 
         const level = player.drawLevel ?? 1;
-        const rateTable = DRAW_RATES[level] ?? DRAW_RATES[1];
+        // [HUKUMAN MODE OTOMATIS] level efektif hanya untuk tabel peluang rarity; `level` asli dipakai untuk log & reset.
+        const _levelPenalized = !!player.autoMode && !player.isBot && (!AUTO_PENALTY_ONLY_AFK || player.autoReason === 'AFK');
+        const _effLevel = _levelPenalized ? Math.max(1, level - AUTO_LEVEL_PENALTY) : level;
+        const rateTable = DRAW_RATES[_effLevel] ?? DRAW_RATES[1];
 
         // Helper: pilih kartu terbaik dari pool berdasarkan rarity tertinggi yang tersedia (sesuai DRAW_RATES level)
         // Urutkan rarity dari tertinggi ke terendah berdasarkan nilai rate di level tersebut
