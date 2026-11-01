@@ -622,7 +622,10 @@ const AUTO_PENALTY_ONLY_AFK = false;
 // Selama mode otomatis aktif, level yang dipakai untuk undian rarity kartu dikurangi AUTO_LEVEL_PENALTY level
 // (minimal Lv1). Level asli (drawLevel) TIDAK berubah, jadi tampilan, log, kenaikan level, dan reset tetap normal.
 // Begitu mode otomatis nonaktif, hukuman ini langsung hilang. Ikut aturan AUTO_PENALTY_ONLY_AFK di atas.
-const AUTO_LEVEL_PENALTY = 5;
+const AUTO_LEVEL_PENALTY = 3;
+// ── RESET LEVEL MODE OTOMATIS (sistem sungguhan, level di layar ikut reset) ──
+// Pemain manusia mode otomatis yang sudah di level ini: setelah SATU kali Tambah Kartu di level tersebut, level reset ke Lv1.
+const AUTO_RESET_AT_LEVEL = 12;
 // ── PENYESUAIAN PELUANG KARTU COCOK PER LEVEL BOT (di belakang layar) ──
 // Bot Lv1 di-nerf (-10 poin persen), Bot Lv2 normal, Bot Lv3 di-buff (+10 poin persen, maksimal 99%).
 const BOT_L1_MATCH_PENALTY = 0.10;
@@ -1594,6 +1597,13 @@ class GameEngine {
             player.drawProb = 0;
             this.broadcastLog(`\uD83D\uDD04 ${player.name} Level Kartu reset ke Lv1 (dapat kartu tertinggi yang tersisa)!`);
             if (!player.isBot) this.sendToPlayer(player.id, { type: 'LOG', message: `\uD83D\uDD04 Kamu dapat [${resetReason}] (tertinggi)! Level Kartu reset ke Lv1.` });
+        } else if (level >= AUTO_RESET_AT_LEVEL && !!player.autoMode && !player.isBot) {
+            // [MODE OTOMATIS] sudah satu kali Tambah Kartu di Lv12 → reset ke Lv1 (sama seperti reset biasa: level, hitungan, peluang)
+            player.drawLevel = 1;
+            player.drawCount = 0;
+            player.drawProb = 0;
+            this.broadcastLog(`\uD83D\uDD04 ${player.name} Level Kartu reset ke Lv1 (mode otomatis, sudah tambah kartu di Lv${AUTO_RESET_AT_LEVEL})!`);
+            this.sendToPlayer(player.id, { type: 'LOG', message: `\uD83D\uDD04 Mode otomatis: Level Kartu reset ke Lv1 setelah tambah kartu di Lv${AUTO_RESET_AT_LEVEL}.` });
         }
         const probPct  = Math.round(prob * 100);
         const isMatch  = chosen.province === this.gs.currentProvince;
